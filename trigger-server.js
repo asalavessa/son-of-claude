@@ -87,3 +87,15 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[${new Date().toISOString()}] Son of Claude Bridge running at http://127.0.0.1:${PORT}`);
   console.log(`Listening for triggers from the Chrome extension...`);
 });
+
+function shutdown(signal) {
+  console.log(`\n[${new Date().toISOString()}] ${signal} received. Shutting down...`);
+  if (activeChild) {
+    console.log(`[${new Date().toISOString()}] Killing active Claude session...`);
+    activeChild.kill('SIGTERM');
+  }
+  server.close(() => process.exit(0));
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
