@@ -10,14 +10,16 @@ A browser-automation agent that monitors Microsoft Teams and responds to message
 
 ## How It Works
 
-When a new Teams message arrives, a Chrome extension detects the unread badge in the tab title and notifies a local Node.js bridge. The bridge spawns Claude Code with `--chrome`, which navigates Teams, reads the message, and responds — then exits. Claude only runs when there is actual activity, saving tokens compared to a polling loop.
+When a new Teams message arrives, a Chrome extension detects the unread badge in the tab title and notifies a local Node.js bridge. The bridge spawns Claude Code with `--chrome`, which navigates Teams, reads the message, and responds. After the first reply, the session stays open for a configurable window (default: 2 minutes) and polls for follow-ups before exiting. Claude only runs when there is actual activity, saving tokens compared to a polling loop.
 
 ```
 Teams tab title changes to "(N) Chat | Name"
   → Chrome extension detects unread count increase
     → POSTs to local bridge (127.0.0.1:3000)
-      → Bridge spawns: claude -p "..." --chrome --model <model>
-        → Claude reads BRAIN.md, navigates Teams, replies, exits
+      → Bridge spawns: bash run.sh session <model>
+        → Claude reads BRAIN.md, navigates Teams, replies
+          → Session loop polls for follow-ups every 10s
+            → Loop exits after SESSION_DURATION seconds (default: 120)
 ```
 
 Personality and tone come from `SOUL.md`. Operational rules — who to respond to, what to avoid, how to navigate Teams — live in `BRAIN.md`.
@@ -181,8 +183,14 @@ Followed by Claude's output as it navigates Teams and replies.
 To stop the agent:
 
 1. Click the extension popup and hit the toggle (turns red — paused). This stops new triggers immediately.
-2. If a Claude session is in progress, it will complete and exit on its own (5-minute hard timeout).
+2. If a session is active, it will run until `SESSION_DURATION` expires (default: 120s from the last reply) before exiting. The bridge enforces a 10-minute hard kill as a safety net.
 3. Stop the bridge: `Ctrl+C` in the bridge terminal.
+
+To shorten or extend the session window:
+```bash
+export SESSION_DURATION=60   # 1-minute session window
+node trigger-server.js
+```
 
 ---
 
@@ -225,7 +233,10 @@ Check Claude's output in the bridge terminal. Common causes:
 - Teams showed an error banner during send — Claude will retry once, then exit
 
 **Claude keeps running and doesn't exit**
-The bridge enforces a 5-minute kill timeout. If it fires frequently, the Run Checklist's step 6 exit instruction may not be reaching Claude. Check that `BRAIN.md` contains step 6 and that the `-p` prompt in `run.sh` references it.
+This is expected behavior during an active session. The session loop polls for follow-ups for `SESSION_DURATION` seconds (default: 120) after the last reply. The bridge enforces a 10-minute hard kill. If the session never exits and no replies are being sent, check that `BRAIN.md`'s Session Follow-up Checklist outputs `NO_NEW_MSG` when there is nothing to reply to.
+
+**Session seems stuck polling with no activity**
+If `run.sh` logs "No follow-up detected" repeatedly for an unusually long time, `SESSION_DURATION` may be set too high. The default is 120 seconds. Override with `export SESSION_DURATION=60` before starting the bridge.
 
 ---
 

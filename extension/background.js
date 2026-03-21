@@ -10,6 +10,7 @@ const ACTIVITY_REGEX = /\((\d+|\*)\)/;
 let lastTriggerTime = 0;
 let lastTitle = '';
 let lastUnreadCount = 0;
+let titleChangeTimeout = null; // 2s debounce on title changes — absorbs burst updates
 
 function normalize(name) {
   return (name || '').trim().toLowerCase();
@@ -48,15 +49,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
   console.log(`Son of Claude: Activity detected. Unread count increased to ${currentCount}.`);
 
-  // Request sender name from content script (best-effort)
-  chrome.tabs.sendMessage(tabId, { type: 'GET_SENDER' }, (response) => {
+  // 2s debounce: if title keeps changing rapidly, wait for it to settle before triggering
+  if (titleChangeTimeout) clearTimeout(titleChangeTimeout);
+  titleChangeTimeout = setTimeout(() => {
+    titleChangeTimeout = null;
+    // Request sender name from content script (best-effort)
+    chrome.tabs.sendMessage(tabId, { type: 'GET_SENDER' }, (response) => {
     // Suppress errors if content script isn't ready
     if (chrome.runtime.lastError) {
       console.log('Son of Claude: Content script not available for sender extraction.');
     }
-    const senderName = (response && response.senderName) || null;
-    handleTrigger(senderName, tab.url);
-  });
+      const senderName = (response && response.senderName) || null;
+      handleTrigger(senderName, tab.url);
+    });
+  }, 2000);
 });
 
 // --- Trigger handler (shared logic) ---

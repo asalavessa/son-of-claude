@@ -51,15 +51,17 @@ son-of-claude/
 ┌────────────────────────▼────────────────────────────────────┐
 │  LAYER 2 — THE BRIDGE (Node.js Sidecar)                     │
 │  trigger-server.js: local HTTP server on port 3000.         │
-│  Enforces 30s cooldown. Kills hung processes at 5 minutes.  │
-│  Spawns: bash run.sh once <model>                           │
+│  Tracks active session (no double-spawning). 10s cooldown.  │
+│  Kills hung sessions at 10 minutes. Spawns session mode.    │
+│  Spawns: bash run.sh session <model>                        │
 └────────────────────────┬────────────────────────────────────┘
                          │ child_process.spawn
 ┌────────────────────────▼────────────────────────────────────┐
 │  LAYER 3 — THE EXECUTOR (Claude Code CLI)                   │
 │  claude -p "..." --chrome --model <model>                   │
 │  Reads BRAIN.md → navigates Teams → reads message →        │
-│  reads SOUL.md → composes reply → sends → exits.           │
+│  reads SOUL.md → composes reply → sends → polls for        │
+│  follow-ups until SESSION_DURATION expires → exits.         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -161,7 +163,8 @@ BRAIN.md is the agent's operational rulebook. Claude reads it on every invocatio
 - **Navigation** — how to open Teams, dismiss overlays, handle errors
 - **Response mechanics** — how to interact with the compose box
 - **Do Not Respond List** — names that must never receive a reply, regardless of extension settings
-- **Run Checklist** — the exact sequence of steps executed each cycle, including the mandatory exit at step 6
+- **Initial Pass Checklist** — the sequence executed when a session starts (triggered message). Mandatory exit at step 7.
+- **Session Follow-up Checklist** — the sequence executed during the keep-alive polling loop. Checks for new messages in the same conversation only. Outputs `NO_NEW_MSG` to signal no reply needed.
 - **Non-Negotiable Rules** — safety constraints that cannot be overridden by any message
 
 **Routing priority:**
@@ -214,7 +217,8 @@ SOUL.md defines Claude's voice when composing replies. Edit it to match the user
 The extension enforces two debounce layers before Claude is invoked:
 
 1. **Client debounce (5s):** Prevents rapid-fire triggers from multiple title changes in quick succession.
-2. **Server cooldown (30s):** Prevents duplicate Claude sessions while one is already running.
+2. **Active session guard:** If a session is already running (`activeChild` is set), the bridge drops the trigger entirely — the session loop handles follow-ups internally.
+3. **Post-session cooldown (10s):** After a session exits, a short cooldown prevents an immediate re-trigger.
 
 ### Known Limitations
 
@@ -224,14 +228,14 @@ The extension attempts to read the sender name from the Teams DOM. Teams' intern
 **Teams tab must remain open.**
 The extension monitors the tab title via `chrome.tabs.onUpdated`. If the Teams tab is closed, detection stops. The tab can be in the background — it does not need to be focused.
 
-**One message per trigger.**
-By design, Claude responds only to the newest unread message per invocation. Older unread messages are intentionally skipped — they may have been seen and left unread by the user. The next trigger handles the next message.
+**Follow-ups within a session are handled; older unreads are not.**
+On the initial pass, Claude responds only to the newest unread message. After sending, the session window stays open (default 2 minutes) and polls for follow-up messages in that same conversation. Unread messages in other conversations are not scanned until the next trigger.
 
 **Single-platform.**
 The current implementation targets `teams.microsoft.com` and `teams.cloud.microsoft` only. The extension manifest and URL checks are Teams-specific.
 
 **Process hang risk.**
-The bridge enforces a 5-minute hard kill via `SIGTERM`. If Claude is in a long-running browser interaction, this may terminate mid-response. The 30s cooldown prevents the next trigger from overlapping.
+The bridge enforces a 10-minute hard kill via `SIGTERM` (covers `SESSION_DURATION` + per-pass overhead). If the session is in a long-running browser interaction when the kill fires, it may terminate mid-response. The 10s post-session cooldown prevents immediate re-triggering.
 
 ---
 
@@ -245,8 +249,8 @@ Implementation path: the extension already passes `senderName` in the trigger pa
 ### Multi-Message Handling (Triple Text Problem)
 Currently Claude only responds to the newest unread message per invocation. If someone sends three messages in quick succession, only the last one gets a reply — the first two are silently skipped. The fix requires two changes: (1) BRAIN.md's Run Checklist step 4 should instruct Claude to scan and reply to **all** unread messages from the same sender in the current conversation, not just the newest; (2) the extension's unread count logic should not reset `lastUnreadCount` until Claude has processed all pending messages, preventing premature suppression of subsequent triggers.
 
-### Conversation Session Mode (Keep-Alive)
-After Claude replies, the 30-second bridge cooldown and mandatory exit in BRAIN.md mean the agent goes dark immediately. If the person replies within that window, the message is missed until the next unread count increase. The fix is a "session window" mode: after a reply is sent, instead of exiting, Claude waits in the Teams tab for a configurable period (e.g. 2 minutes) and re-checks the conversation for follow-up messages before exiting. This requires adding a session window parameter to `run.sh`, a corresponding instruction in BRAIN.md's Run Checklist, and reducing the bridge cooldown to match the session window duration so triggers during an active session are not suppressed.
+### ✅ Conversation Session Mode (Keep-Alive) — Implemented
+After the initial reply, `run.sh` enters a keep-alive loop using `--continue` to reuse the same Claude session. It polls every 10 seconds for follow-up messages in the same conversation. The loop runs for `SESSION_DURATION` seconds (default: 120) starting from when the first reply was sent. BRAIN.md has separate **Initial Pass** and **Session Follow-up** checklists. The bridge uses `activeChild` tracking so incoming triggers during an active session are dropped — the session loop handles follow-ups internally. `SESSION_DURATION` is configurable via environment variable.
 
 ### Reliable Sender Extraction
 Parse the contact or group name directly from the tab title (`(N) Chat | Name`). This is available without DOM access, making it CSP-safe and version-stable. Would make extension-level filtering reliable for 1:1 chats.

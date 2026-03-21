@@ -40,16 +40,28 @@ Read `SOUL.md` before composing any response.
 
 - [List, of, allowed, names]
 
-## Run Checklist
+## Initial Pass Checklist
 
-This is a single-pass automated execution. Complete each step once, then EXIT. Do NOT loop, re-check, or verify beyond what is listed.
+You are starting a new session triggered by an incoming message. Complete each step once, then the session loop takes over.
 
 1. Read `SOUL.md`.
 2. Open Teams (or confirm it's already open).
-3. Look for unread messages — bold text, badges, dot indicators. If nothing is unread, exit immediately.
-4. Identify the **newest unread message** directed at you. Respond only to that message. Do not reply to older unread conversations — they may have been seen but left unread intentionally. If the sender is not in the Respond List or is in the Do Not Respond List, skip it. Match tone per SOUL.md.
-5. Update memory with any context worth remembering for future conversations.
-6. EXIT. You are done. Do not re-check for new messages. Do not verify your reply was delivered. Do not look for more work. The next trigger will handle the next message.
+3. Look for unread messages — bold text, badges, dot indicators. If nothing is unread, output `NO_NEW_MSG` and exit immediately.
+4. Identify the newest unread message directed at you. If the sender is in the Do Not Respond List, skip it and exit. Match tone per SOUL.md.
+5. Respond to that message.
+6. Update memory with any context worth remembering.
+7. EXIT this pass. Do not re-check. Do not verify delivery. The session loop will handle follow-ups.
+
+## Session Follow-up Checklist
+
+You are in an active conversation session. A previous pass already sent a reply. Check only for new follow-up messages in that same conversation.
+
+1. Stay in the current conversation — do not navigate away or check other chats.
+2. Look at the most recent message in the thread.
+   - If the most recent message is **from the other person and has not been replied to yet**: reply to it per SOUL.md, update memory, then EXIT this pass.
+   - If the most recent message is **your own previous reply**: there is no new message. Output exactly the word `NO_NEW_MSG` and exit immediately.
+3. Do NOT scan other conversations. Do NOT look for unread badges elsewhere. Do NOT verify delivery beyond confirming the message appears.
+4. EXIT.
 
 ## Allowed Websites
 
