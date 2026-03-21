@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Son of Claude</title>
+  <style>
+    body { font-family: sans-serif; font-size: 13px; width: 260px; padding: 12px; margin: 0; color: #222; }
+    h2 { font-size: 14px; margin: 0 0 12px; }
+    label { display: block; font-weight: bold; margin: 10px 0 4px; }
+    .radio-group { display: flex; flex-direction: column; gap: 4px; }
+    .radio-group label { font-weight: normal; display: flex; align-items: center; gap: 6px; margin: 0; }
+    textarea { width: 100%; box-sizing: border-box; height: 64px; font-size: 12px; resize: vertical; }
+    .hint { font-size: 11px; color: #666; margin: 2px 0 0; }
+    button { margin-top: 12px; width: 100%; padding: 6px; font-size: 13px; cursor: pointer; }
+    #toggleBtn { font-weight: bold; }
+    #toggleBtn.on { background: #d4edda; color: #155724; border-color: #c3e6cb; }
+    #toggleBtn.off { background: #f8d7da; color: #721c24; border-color: #f5c6cb; }
+    #status { font-size: 12px; color: green; margin-top: 6px; min-height: 16px; }
+  </style>
+</head>
+<body>
+  <h2>Son of Claude</h2>
+
+  <button id="toggleBtn">...</button>
+
+  <label>Model</label>
+  <div class="radio-group">
+    <label><input type="radio" name="model" value="claude-haiku-4-5-20251001"> Haiku (fastest)</label>
+    <label><input type="radio" name="model" value="claude-sonnet-4-6" checked> Sonnet (default)</label>
+    <label><input type="radio" name="model" value="claude-opus-4-6"> Opus (most capable)</label>
+  </div>
+
+  <label for="ignoreList">Never reply to</label>
+  <textarea id="ignoreList" placeholder="One name per line&#10;e.g. Bot Notifications"></textarea>
+
+  <label for="replyOnlyList">Only reply to</label>
+  <textarea id="replyOnlyList" placeholder="One name per line&#10;Leave empty to reply to all"></textarea>
+  <p class="hint">Leave empty = reply to everyone not on the ignore list.</p>
+
+  <button id="saveBtn">Save</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

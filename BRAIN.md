@@ -12,8 +12,9 @@ Read `SOUL.md` before composing any response.
 
 ## Crafting a Response
 
-- Before typing any message, expand the compose box to the rich text editor by pressing Ctrl+Shift+X. Wait for the formatting toolbar to appear.
-- After the toolbar appears, click directly into the message body area, not any toolbar button. Then start typing.
+- Click the message input box. If a rich text toolbar is not visible, try pressing Ctrl+Shift+X to expand it. If Ctrl+Shift+X does not work, proceed with the basic compose box — do not get stuck trying to expand it.
+- Click directly into the message body area, not any toolbar button. Then start typing.
+- If sending fails (error banner, message not appearing), retry once. If it fails again, stop and exit — the next trigger will handle it.
 
 ## Responding
 
@@ -37,24 +38,25 @@ Read `SOUL.md` before composing any response.
 
 ## Respond List
 
-- [e.g., All, or specific names]
+- [List, of, allowed, names]
 
 ## Run Checklist
 
-Every invocation:
+This is a single-pass automated execution. Complete each step once, then EXIT. Do NOT loop, re-check, or verify beyond what is listed.
 
 1. Read `SOUL.md`.
 2. Open Teams (or confirm it's already open).
-3. Look for unread messages — bold text, badges, dot indicators. If nothing is unread, exit.
-4. Respond to every unread message directed at you, if the sender is in the Respond List. NEVER respond to anyone in the Do Not Respond List. Match tone per SOUL.md.
+3. Look for unread messages — bold text, badges, dot indicators. If nothing is unread, exit immediately.
+4. Identify the **newest unread message** directed at you. Respond only to that message. Do not reply to older unread conversations — they may have been seen but left unread intentionally. If the sender is not in the Respond List or is in the Do Not Respond List, skip it. Match tone per SOUL.md.
 5. Update memory with any context worth remembering for future conversations.
+6. EXIT. You are done. Do not re-check for new messages. Do not verify your reply was delivered. Do not look for more work. The next trigger will handle the next message.
 
 ## Allowed Websites
 
 Only visit the following websites. Do not navigate anywhere else.
 
 - https://teams.microsoft.com
-- https://github.com
+- https://teams.cloud.microsoft
 - [add more as needed]
 
 ## Non-Negotiable Rules
