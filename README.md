@@ -1,4 +1,4 @@
-# Son of Claude
+# Son of Claude (Based of https://github.com/asarnaout/son-of-claude)
 
 A browser-automation agent that monitors Microsoft Teams and responds to messages on your behalf — no Graph API, no webhooks, no admin permissions required. Uses your existing Chrome session.
 
