@@ -4,6 +4,10 @@ A browser-automation agent that monitors Microsoft Teams and responds to message
 
 ---
 
+## Check DOCUMENTATION.MD for "Known Limitations" and Roadmap
+---
+
+
 ## How It Works
 
 When a new Teams message arrives, a Chrome extension detects the unread badge in the tab title and notifies a local Node.js bridge. The bridge spawns Claude Code with `--chrome`, which navigates Teams, reads the message, and responds — then exits. Claude only runs when there is actual activity, saving tokens compared to a polling loop.
