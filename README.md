@@ -10,27 +10,28 @@ A browser-automation agent that monitors Microsoft Teams and responds to message
 
 ## How It Works
 
-When a new Teams message arrives, a Chrome extension intercepts the raw WebSocket (SignalR) frame to extract the exact sender name, message text, and conversation ID — before the UI even updates. The data is relayed to a local Node.js bridge, which spawns Claude Code with the message context pre-loaded. Claude navigates directly to the conversation (via deep-link for private chats), reads all unread messages, and responds. After the first reply, the session stays open for a configurable window (default: 5 minutes) and polls for follow-ups before exiting. Claude only runs when there is actual activity, saving tokens compared to a polling loop.
+When a new Teams message arrives, a Chrome extension intercepts the raw WebSocket (SignalR) frame to extract the exact sender name, message text, and conversation ID — before the UI even updates. The data is relayed to a local Node.js bridge, which queues the trigger and spawns Claude Code as soon as the agent is free. Claude navigates directly to the conversation (via deep-link for private chats), reads all unread messages, and responds. Messages are never dropped when Claude is busy — they wait in a FIFO queue. After the first reply, the session stays open for a configurable window (default: 5 minutes) and polls for follow-ups before exiting.
 
 A legacy fallback path (tab title monitoring) runs in parallel and activates automatically if the WebSocket interception fails.
 
 ```
 PRIMARY PATH — WebSocket Interception:
   Teams receives a SignalR WebSocket frame
-    → interceptor.js (MAIN world) parses JSON, extracts sender + text
+    → interceptor.js (MAIN world) parses SignalR JSON, extracts sender + text
       → bridge.js (ISOLATED world) relays via chrome.runtime.sendMessage
-        → background.js batches messages (3s window), applies filters
+        → background.js batches messages (3s window), applies sender filters
           → POSTs enriched payload to local bridge (127.0.0.1:3000)
-            → Bridge resolves identity, generates deep-link
-              → Spawns: bash run.sh session <model> <url> <sender> <text>
-                → Claude navigates directly, responds to ALL messages
+            → Bridge deduplicates, queues task → 202 Accepted
+              → processQueue() spawns: bash run.sh session <model> <url> <sender> <text>
+                → Claude navigates directly, responds to ALL unread messages
                   → Session loop polls for follow-ups
                     → Loop exits after SESSION_DURATION seconds
+                      → Cooldown (10s) → processQueue() drains next queued task
 
 FALLBACK PATH — Tab Title Monitoring:
   Teams tab title changes to "(N) Chat | Name"
     → background.js detects unread count increase
-      → POSTs to bridge → spawns Claude (without pre-loaded text)
+      → POSTs to bridge → queued → spawns Claude (without pre-loaded text)
 ```
 
 Personality and tone come from `SOUL.md`. Operational rules — who to respond to, what to avoid, how to navigate Teams — live in `BRAIN.md`.
@@ -278,6 +279,12 @@ The interceptor learns the self-ID from outgoing `WebSocket.send()` calls. If no
 
 **Unknown Entra ID notification keeps appearing**
 Map the ID at `http://localhost:3000/identities`. The notification fires each time a trigger arrives with an unmapped sender ID.
+
+**Messages from other people are delayed, not ignored**
+This is expected. The bridge queues triggers while a session is active and processes them after the current session ends and the 10s cooldown expires. Check `GET http://localhost:3000/status` for `{ "active": true/false, "queueLength": N }` to see current state.
+
+**The same message triggered Claude twice**
+The bridge deduplicates by `conversationId + sender + text`. If the text differs slightly (e.g. HTML vs plain text), it won't be caught as a duplicate. Check the bridge terminal logs for `[Queue] Dropped duplicate` to confirm deduplication is firing.
 
 ---
 

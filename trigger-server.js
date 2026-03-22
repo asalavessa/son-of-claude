@@ -9,14 +9,16 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const PORT = 3000;
-const COOLDOWN_MS = 10000; // Short cooldown — activeChild tracking prevents double-spawning
+const COOLDOWN_MS = 10000;
 const SESSION_TIMEOUT_MS = 600000; // 10 minute hard kill (covers SESSION_DURATION + overhead)
 const RUN_SCRIPT = path.join(__dirname, 'run.sh');
 
 const IDENTITY_CACHE_PATH = path.join(__dirname, 'identity-cache.json');
 
-let activeChild = null;   // Reference to running claude process (null when idle)
-let cooldownUntil = 0;    // Timestamp after which new triggers are accepted
+let activeChild = null;            // Reference to running claude process (null when idle)
+let cooldownUntil = 0;             // Timestamp after which new triggers are accepted
+let messageQueue = [];             // FIFO queue of enriched task objects
+let processedSignatures = new Set(); // Deduplication fingerprints (capped at 500)
 
 function loadIdentityCache() {
   try {
@@ -40,6 +42,69 @@ function generateDeepLink(conversationId) {
     return '';
   }
   return '';
+}
+
+function processQueue() {
+  // Guard clauses
+  if (activeChild !== null) return;
+  if (Date.now() < cooldownUntil) return;
+  if (messageQueue.length === 0) return;
+
+  // Prune stale messages (older than 1 hour)
+  const ONE_HOUR = 3600000;
+  const now = Date.now();
+  messageQueue = messageQueue.filter(task => {
+    if (now - task.timestamp > ONE_HOUR) {
+      console.log(`[${new Date().toISOString()}] [Queue] Dropped stale message from ${task.senderName || 'unknown'}`);
+      return false;
+    }
+    return true;
+  });
+  if (messageQueue.length === 0) return;
+
+  // Peek at the oldest task to determine the target conversation
+  const targetConversationId = messageQueue[0].conversationId;
+  const targetSenderName = messageQueue[0].senderName;
+  const model = messageQueue[0].model;
+  const teamsUrl = messageQueue[0].teamsUrl;
+
+  // Extract all messages for this conversation and remove them from the queue
+  const matchingTasks = messageQueue.filter(m => m.conversationId === targetConversationId);
+  messageQueue = messageQueue.filter(m => m.conversationId !== targetConversationId);
+
+  // Combine message texts
+  const combinedText = matchingTasks.map(m => m.messageText).filter(Boolean).join('\n---\n');
+
+  // Log any unknown identities that can't be surfaced via response (we respond 202 before spawn)
+  matchingTasks.forEach(t => {
+    if (t.unknownIdentity) {
+      console.log(`[${new Date().toISOString()}] [Queue] Unknown identity flagged for session: ${t.unknownIdentity}`);
+    }
+  });
+
+  console.log(`[${new Date().toISOString()}] [Process] Starting session for ${targetSenderName || 'unknown'}. Combined ${matchingTasks.length} message(s). Queue remaining: ${messageQueue.length}`);
+  if (teamsUrl) console.log(`[${new Date().toISOString()}] [Process] Deep-link: ${teamsUrl}`);
+
+  activeChild = spawn('bash', [RUN_SCRIPT, 'session', model, teamsUrl, targetSenderName, combinedText], {
+    stdio: ['ignore', 'inherit', 'inherit']
+  });
+
+  // Hard kill safety net
+  const killTimer = setTimeout(() => {
+    console.log(`[${new Date().toISOString()}] Session exceeded ${SESSION_TIMEOUT_MS / 60000} minute timeout. Killing process.`);
+    activeChild.kill('SIGTERM');
+  }, SESSION_TIMEOUT_MS);
+
+  activeChild.on('close', (code) => {
+    clearTimeout(killTimer);
+    activeChild = null;
+    cooldownUntil = Date.now() + COOLDOWN_MS;
+    console.log(`[${new Date().toISOString()}] Session finished (exit ${code}). Cooldown ${COOLDOWN_MS / 1000}s...`);
+    setTimeout(() => {
+      console.log(`[${new Date().toISOString()}] [Queue] Cooldown complete. Checking for pending tasks...`);
+      processQueue();
+    }, COOLDOWN_MS);
+  });
 }
 
 const server = http.createServer((req, res) => {
@@ -109,7 +174,7 @@ body:JSON.stringify({id,name:null})}).then(()=>location.reload())}
   // --- Session status endpoint ---
   if (req.url === '/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ active: !!activeChild }));
+    res.end(JSON.stringify({ active: !!activeChild, queueLength: messageQueue.length }));
     return;
   }
 
@@ -119,15 +184,7 @@ body:JSON.stringify({id,name:null})}).then(()=>location.reload())}
     return;
   }
 
-  // If a session is actively running, ignore the trigger — the session loop handles follow-ups
-  if (activeChild) {
-    console.log(`[${new Date().toISOString()}] Trigger ignored — session already active.`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'active_session_exists' }));
-    return;
-  }
-
-  // Post-session cooldown (prevents immediate re-trigger after session ends)
+  // Post-session cooldown (prevents post-session burst from flooding the queue)
   if (Date.now() < cooldownUntil) {
     console.log(`[${new Date().toISOString()}] Trigger ignored — in cooldown.`);
     res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -165,35 +222,40 @@ body:JSON.stringify({id,name:null})}).then(()=>location.reload())}
     // Smart deep-link generation
     const teamsUrl = generateDeepLink(conversationId) || payload.source || '';
 
-    console.log(`[${new Date().toISOString()}] Activity detected. Sender: ${senderName || 'unknown'}, Model: ${model}, URL: ${teamsUrl || 'none'}`);
+    // Deduplication check
+    const signature = `${conversationId}|${senderName}|${messageText}`;
+    if (processedSignatures.has(signature)) {
+      console.log(`[${new Date().toISOString()}] [Queue] Dropped duplicate from ${senderName || 'unknown'}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ignored_duplicate' }));
+      return;
+    }
+    processedSignatures.add(signature);
+    if (processedSignatures.size > 500) {
+      processedSignatures.delete(processedSignatures.values().next().value);
+    }
+
+    // Push to queue
+    messageQueue.push({
+      timestamp: Date.now(),
+      senderName,
+      senderId,
+      model,
+      teamsUrl,
+      messageText,
+      messageCount,
+      conversationId,
+      replyToId,
+      unknownIdentity
+    });
+
+    console.log(`[${new Date().toISOString()}] [Queue] Added from ${senderName || 'unknown'}. Queue length: ${messageQueue.length}`);
     if (messageText) console.log(`[${new Date().toISOString()}] Message text (${messageCount} msg${messageCount > 1 ? 's' : ''}): ${messageText.substring(0, 200)}${messageText.length > 200 ? '...' : ''}`);
-    if (conversationId) console.log(`[${new Date().toISOString()}] Conversation: ${conversationId}`);
-    console.log(`[${new Date().toISOString()}] Starting session...`);
 
-    activeChild = spawn('bash', [RUN_SCRIPT, 'session', model, teamsUrl, senderName, messageText], {
-      stdio: ['ignore', 'inherit', 'inherit']
-    });
+    res.writeHead(202, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'queued', queueLength: messageQueue.length }));
 
-    // Hard kill safety net — covers SESSION_DURATION + per-pass overhead
-    const killTimer = setTimeout(() => {
-      console.log(`[${new Date().toISOString()}] Session exceeded ${SESSION_TIMEOUT_MS / 60000} minute timeout. Killing process.`);
-      activeChild.kill('SIGTERM');
-    }, SESSION_TIMEOUT_MS);
-
-    activeChild.on('close', (code) => {
-      clearTimeout(killTimer);
-      activeChild = null;
-      cooldownUntil = Date.now() + COOLDOWN_MS;
-      console.log(`[${new Date().toISOString()}] Session finished (exit ${code}). Cooldown ${COOLDOWN_MS / 1000}s...`);
-      setTimeout(() => {
-        console.log(`[${new Date().toISOString()}] Ready for next trigger.`);
-      }, COOLDOWN_MS);
-    });
-
-    const response = { status: 'session_started', timestamp: new Date().toISOString() };
-    if (unknownIdentity) response.unknown_identity = unknownIdentity;
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(response));
+    processQueue();
   });
 });
 

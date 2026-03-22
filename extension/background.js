@@ -169,9 +169,9 @@ function flushWsBatch() {
     .then(res => res.json())
     .then(data => {
       console.log('Son of Claude [ws]: Bridge response:', data);
-      if (data.status === 'session_started') {
+      if (data.status === 'queued' || data.status === 'session_started') {
         wsSessionActive = true;
-        console.log('Son of Claude [ws]: Session started — suppressing further WS triggers until session ends.');
+        console.log(`Son of Claude [ws]: Accepted (${data.status}) — suppressing further WS triggers until session ends.`);
         pollForSessionEnd();
       } else {
         console.log(`Son of Claude [ws]: Trigger not accepted (${data.status}).`);
@@ -267,12 +267,12 @@ function handleTrigger(senderName, source, currentUnreadCount) {
       .then(res => res.json())
       .then(data => {
         console.log('Son of Claude: Bridge response:', data);
-        if (data.status === 'session_started') {
+        if (data.status === 'queued' || data.status === 'session_started') {
           // Bridge accepted the trigger — commit the count so we don't re-trigger for same backlog
           lastUnreadCount = pendingCount;
-          console.log(`Son of Claude: lastUnreadCount committed to ${pendingCount}.`);
+          console.log(`Son of Claude: Trigger accepted (${data.status}). lastUnreadCount committed to ${pendingCount}.`);
         } else {
-          // active_session_exists, cooldown, or ignored — preserve lastUnreadCount so we can re-trigger later
+          // cooldown, ignored_duplicate, or other — preserve lastUnreadCount so we can re-trigger later
           console.log(`Son of Claude: Trigger not accepted (${data.status}). Preserving lastUnreadCount at ${lastUnreadCount}.`);
         }
       })

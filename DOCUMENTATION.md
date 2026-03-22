@@ -75,11 +75,12 @@ The system has two parallel detection paths — **WebSocket interception** (prim
 ┌────────────────────────▼────────────────────────────────────────┐
 │  LAYER 2 — THE BRIDGE (Node.js Sidecar)                         │
 │  trigger-server.js: local HTTP server on port 3000.             │
-│  Accepts legacy and enriched payloads. Identity cache lookup.   │
-│  Smart deep-links: private chats (.v2) get direct URLs;         │
-│  shared channels (.tacv2) fall back to standard navigation.     │
-│  Tracks active session (no double-spawning). 10s cooldown.      │
-│  GET /status — session state for extension polling.              │
+│  /trigger always accepts — deduplicates, queues, returns 202.   │
+│  FIFO messageQueue: batches same-conversation messages.         │
+│  processQueue() spawns Claude when idle; retries after cooldown.│
+│  Identity cache lookup. Smart deep-links (.v2 only).            │
+│  Stale tasks (>1h) pruned automatically.                        │
+│  GET /status — { active, queueLength } for extension polling.   │
 │  GET/POST /identities — admin UI for Entra ID→name mapping.    │
 │  Spawns: bash run.sh session <model> <url> <sender> <text>      │
 └────────────────────────┬────────────────────────────────────────┘
@@ -245,13 +246,15 @@ SOUL.md defines Claude's voice when composing replies. Edit it to match the user
 
 The WebSocket path provides additional token savings because the exact message text and sender are passed directly to Claude, eliminating the need for DOM navigation to discover who sent what.
 
-The extension enforces multiple debounce layers before Claude is invoked:
+The system uses layered deduplication and queueing rather than dropping triggers:
 
-1. **Bridge.js dedup debounce (2s):** Suppresses duplicate `CustomEvent` dispatches for the same sender+text.
-2. **Batch accumulation window (3s):** Multiple messages arriving within 3 seconds are combined into a single trigger with all texts joined.
-3. **Client debounce (5s):** Prevents rapid-fire triggers from the title-monitoring path.
-4. **Active session guard:** If a session is already running, the WS path suppresses all incoming messages (the session loop handles follow-ups internally). The extension polls `GET /status` every 10s to detect when the session ends and re-enables triggers. The title path preserves `lastUnreadCount` on a dropped trigger so it can re-trigger once the session ends.
-5. **Post-session cooldown (10s):** After a session exits, a short cooldown prevents an immediate re-trigger.
+1. **Bridge.js dedup debounce (2s):** Suppresses duplicate `CustomEvent` dispatches for the same sender+text before they leave the extension.
+2. **Batch accumulation window (3s):** Multiple messages arriving within 3 seconds are combined into one trigger before the bridge POST.
+3. **Client debounce (5s):** Prevents rapid-fire triggers from the tab-title monitoring path.
+4. **Server-side deduplication (`processedSignatures` Set):** The bridge fingerprints each trigger as `conversationId|senderName|messageText`. Exact duplicates are rejected with `ignored_duplicate` regardless of queue state. The Set is capped at 500 entries (FIFO eviction).
+5. **FIFO message queue:** Instead of dropping triggers when a session is active, the bridge queues them. `processQueue()` spawns Claude as soon as the previous session ends and the cooldown expires. Messages for the same conversation are batched together before spawning.
+6. **Active session guard (extension-side):** While `wsSessionActive` is true, the extension suppresses new WS batch flushes. It polls `GET /status` every 10s; once `active: false` is returned, triggers re-enable.
+7. **Post-session cooldown (10s):** After a session exits, a short cooldown prevents the queue from spawning immediately — allows Teams state to settle. During cooldown, new `/trigger` POSTs are rejected (not queued).
 
 ### Known Limitations
 
@@ -267,8 +270,8 @@ The interceptor filters out the user's own messages by learning the self-ID from
 **Teams tab must remain open.**
 The extension monitors the tab title via `chrome.tabs.onUpdated`. If the Teams tab is closed, detection stops. The tab can be in the background — it does not need to be focused.
 
-**Multi-message backlogs are handled within a conversation; other conversations are not.**
-On the initial pass, Claude scans the entire thread for all unread messages from the sender and addresses them in a single response. The session window (default 2 minutes) then stays open for follow-ups in that same conversation. Unread messages in other conversations are not scanned until the next trigger.
+**Concurrent conversations are queued, not dropped.**
+If Claude is responding to Alice and Bob sends a message, Bob's trigger is queued in the bridge. When Alice's session finishes (and the 10s cooldown expires), the queue processor picks up Bob's task automatically with full context preserved. Messages are never lost due to concurrency. However, the queue is in-memory — restarting `trigger-server.js` clears it.
 
 **Single-platform.**
 The current implementation targets `teams.microsoft.com` and `teams.cloud.microsoft` only. The extension manifest and URL checks are Teams-specific.
@@ -285,8 +288,8 @@ Currently filtering is split across two places: the extension popup (ignore list
 
 Implementation path: the extension already passes `senderName` in the trigger payload. Extend the payload to also include the full `ignoreList` and `replyOnlyList` from `chrome.storage.local`. In `trigger-server.js`, write these lists to a local `runtime-config.json` on each trigger. Add a `Read` tool invocation at the start of BRAIN.md's Run Checklist to load `runtime-config.json`, and replace the static Do Not Respond / Respond List sections in BRAIN.md with a reference to that file. This makes the extension popup the authoritative UI and eliminates the need to edit BRAIN.md for routing changes.
 
-### ✅ Multi-Message Handling (Triple Text Problem) — Implemented
-Claude now scans the entire thread for all unread messages from the sender on the initial pass and addresses them together in a single chronological response. The extension's trigger condition was changed from `count > last` to `count !== last && count > 0`, so a count that decreases (e.g. 3→2 after a partial session) still fires a trigger. `lastUnreadCount` is only committed when the bridge responds `session_started` — dropped triggers (`active_session_exists`, cooldown) preserve the old value so the extension can re-trigger once the session ends.
+### ✅ Multi-Message & Concurrent Conversation Handling — Implemented
+Triggers are never dropped when Claude is busy. The bridge maintains a FIFO `messageQueue`; `/trigger` always accepts payloads (returning `202 queued`) and `processQueue()` spawns Claude as soon as the current session ends. Messages for the same conversation are batched before spawning. Server-side deduplication (`processedSignatures` Set, capped at 500) prevents exact-duplicate triggers from queueing. Stale queue entries older than 1 hour are pruned automatically. On the extension side, `lastUnreadCount` is committed when the bridge responds `queued` or `session_started`; cooldown rejections preserve the old value so the tab-title path can re-trigger after cooldown.
 
 ### ✅ Conversation Session Mode (Keep-Alive) — Implemented
 After the initial reply, `run.sh` enters a keep-alive loop using `--continue` to reuse the same Claude session. It polls every 10 seconds for follow-up messages in the same conversation. The loop runs for `SESSION_DURATION` seconds (default: 120) starting from when the first reply was sent. BRAIN.md has separate **Initial Pass** and **Session Follow-up** checklists. The bridge uses `activeChild` tracking so incoming triggers during an active session are dropped — the session loop handles follow-ups internally. `SESSION_DURATION` is configurable via environment variable.
