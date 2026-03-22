@@ -3,7 +3,7 @@
   "name": "Son of Claude Watcher",
   "version": "1.0",
   "description": "Monitors Teams for unread activity and triggers Claude CLI.",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "notifications"],
   "host_permissions": ["https://teams.microsoft.com/*", "https://teams.cloud.microsoft/*", "http://127.0.0.1:3000/*"],
   "action": {
     "default_popup": "popup.html",
@@ -13,6 +13,18 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["https://teams.microsoft.com/*", "https://teams.cloud.microsoft/*"],
+      "js": ["interceptor.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://teams.microsoft.com/*", "https://teams.cloud.microsoft/*"],
+      "js": ["bridge.js"],
+      "world": "ISOLATED",
+      "run_at": "document_start"
+    },
     {
       "matches": ["https://teams.microsoft.com/*", "https://teams.cloud.microsoft/*"],
       "js": ["content.js"]

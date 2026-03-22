@@ -7,7 +7,7 @@ Read `SOUL.md` before composing any response.
 ## Opening Teams
 
 1. Navigate to `https://teams.microsoft.com`. If not signed in, stop. Do not attempt to enter credentials.
-2. Wait for the app to fully load before interacting.
+2. Wait until the message input box or a conversation pane is visible. If already visible, proceed immediately. Do not wait longer than 5 seconds — if nothing loads, refresh once and retry.
 3. Dismiss any "Use the web app" prompts, notification dialogs, or "What's new" overlays.
 
 ## Crafting a Response
@@ -27,10 +27,10 @@ Read `SOUL.md` before composing any response.
 
 ## Edge Cases
 
-- **Loading spinners:** Wait 10 seconds, then refresh and retry.
+- **Loading spinners:** Wait up to 5 seconds. If the spinner clears, proceed immediately. If not, refresh once and retry.
 - **Popups / modals:** Dismiss with X, Close, Not now, or Escape.
 - **Login screen:** Stop. Do not enter credentials.
-- **Error banners:** Wait 30 seconds, retry once. If persistent, stop.
+- **Error banners:** Check if the error clears within 3 seconds. If not, retry the action once. If the error persists after the retry, stop and exit.
 
 ## Do Not Respond List
 
@@ -47,8 +47,8 @@ You are starting a new session triggered by an incoming message. Complete each s
 1. Read `SOUL.md`.
 2. Open Teams (or confirm it's already open).
 3. Look for unread messages — bold text, badges, dot indicators. If nothing is unread, output `NO_NEW_MSG` and exit immediately.
-4. Identify the newest unread message directed at you. If the sender is in the Do Not Respond List, skip it and exit. Match tone per SOUL.md.
-5. Respond to that message.
+4. Open the conversation with unread messages. Scan the entire thread and identify **all** unread messages from the sender — look for "New" dividers, unread styling, or messages you have not yet replied to. If the sender is in the Do Not Respond List, skip and exit. Read all unread messages before composing a reply. Address all of them together in a single, coherent response in chronological order. Match tone per SOUL.md.
+5. Send that response.
 6. Update memory with any context worth remembering.
 7. EXIT this pass. Do not re-check. Do not verify delivery. The session loop will handle follow-ups.
 
@@ -57,9 +57,9 @@ You are starting a new session triggered by an incoming message. Complete each s
 You are in an active conversation session. A previous pass already sent a reply. Check only for new follow-up messages in that same conversation.
 
 1. Stay in the current conversation — do not navigate away or check other chats.
-2. Look at the most recent message in the thread.
-   - If the most recent message is **from the other person and has not been replied to yet**: reply to it per SOUL.md, update memory, then EXIT this pass.
-   - If the most recent message is **your own previous reply**: there is no new message. Output exactly the word `NO_NEW_MSG` and exit immediately.
+2. Scan the **last 5 messages** in the thread for any messages from the other person that have not yet been replied to (look for "New" dividers, unread styling, or messages after your last reply).
+   - If there are **any unread messages from the other person**: read all of them, address them together in a single response in chronological order per SOUL.md, update memory, then EXIT this pass.
+   - If **every message from the other person already has a reply from you**: there is nothing new. Output exactly the word `NO_NEW_MSG` and exit immediately.
 3. Do NOT scan other conversations. Do NOT look for unread badges elsewhere. Do NOT verify delivery beyond confirming the message appears.
 4. EXIT.
 

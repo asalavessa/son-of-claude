@@ -22,47 +22,75 @@
 son-of-claude/
 ├── BRAIN.md                  # Operational rules, routing logic, run checklist
 ├── SOUL.md                   # Personality, tone, per-person notes
-├── run.sh                    # Entry point: event-driven (once) + legacy polling modes
-├── trigger-server.js         # Node.js bridge: receives extension triggers, spawns Claude
+├── run.sh                    # Entry point: session, once, and legacy polling modes
+├── trigger-server.js         # Node.js bridge: receives triggers, spawns Claude, identity cache
+├── identity-cache.json       # Entra ID → display name mappings (auto-created, editable via admin UI)
 ├── extension/
-│   ├── manifest.json         # MV3 Chrome Extension manifest
-│   ├── background.js         # Service worker: title monitoring, filtering, bridge POST
-│   ├── content.js            # Content script: best-effort sender name extraction
+│   ├── manifest.json         # MV3 Chrome Extension manifest (dual-world content scripts)
+│   ├── interceptor.js        # MAIN world: WebSocket monkey-patch, SignalR frame parsing
+│   ├── bridge.js             # ISOLATED world: relays intercepted data to background.js
+│   ├── background.js         # Service worker: WS + title detection, filtering, bridge POST
+│   ├── content.js            # Content script: legacy best-effort sender name extraction
 │   ├── popup.html            # Extension popup UI
 │   └── popup.js              # Popup logic: reads/writes chrome.storage.local
 ├── scripts/
 │   ├── extension-installer.sh  # Validates extension files, prints install instructions
-│   └── test-trigger.sh         # Manual end-to-end trigger test via curl
+│   ├── test-trigger.sh         # Manual end-to-end trigger test (legacy path)
+│   └── test-websocket.sh       # Manual test for enriched WebSocket payload path
 └── docs/
     └── INTEGRATION.md          # Bridge setup and verification guide
 ```
 
 ### Three-Layer Architecture
 
+The system has two parallel detection paths — **WebSocket interception** (primary, high-fidelity) and **tab title monitoring** (legacy fallback). Both feed into the same bridge and executor.
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  LAYER 1 — THE WATCHER (Chrome Extension)                   │
-│  Monitors Teams tab title via chrome.tabs.onUpdated.        │
-│  Detects unread count increase: "(N) Chat | Name"           │
-│  Applies user-configured ignore/reply-only filters.         │
-│  POSTs { type, timestamp, senderName, model } to Bridge.    │
-└────────────────────────┬────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYER 1 — THE WATCHER (Chrome Extension)                       │
+│                                                                  │
+│  PATH A — WebSocket Interception (Primary)                       │
+│    interceptor.js (MAIN world, document_start):                  │
+│      Monkey-patches WebSocket constructor before Teams loads.    │
+│      Parses SignalR frames (0x1E delimiter), filters noise.      │
+│      Extracts: sender, senderId, text, conversationId.           │
+│      Filters out self-messages (learned from outgoing send()).   │
+│      Dispatches CustomEvent → bridge.js                          │
+│    bridge.js (ISOLATED world):                                   │
+│      Dumb pipe. Relays CustomEvent → background.js               │
+│      via chrome.runtime.sendMessage. 2s dedup debounce.          │
+│    background.js:                                                │
+│      Batches messages in 3s window. Applies sender filters.      │
+│      POSTs enriched payload to Bridge.                           │
+│                                                                  │
+│  PATH B — Tab Title Monitoring (Fallback)                        │
+│    background.js (service worker):                               │
+│      Monitors tab title for "(N) Chat | Name" via onUpdated.    │
+│      Requests sender from content.js (best-effort DOM scrape).  │
+│      POSTs legacy payload to Bridge.                             │
+│                                                                  │
+│  Both paths apply ignore/reply-only filters from popup settings. │
+└────────────────────────┬────────────────────────────────────────┘
                          │ HTTP POST → 127.0.0.1:3000/trigger
-┌────────────────────────▼────────────────────────────────────┐
-│  LAYER 2 — THE BRIDGE (Node.js Sidecar)                     │
-│  trigger-server.js: local HTTP server on port 3000.         │
-│  Tracks active session (no double-spawning). 10s cooldown.  │
-│  Kills hung sessions at 10 minutes. Spawns session mode.    │
-│  Spawns: bash run.sh session <model>                        │
-└────────────────────────┬────────────────────────────────────┘
+┌────────────────────────▼────────────────────────────────────────┐
+│  LAYER 2 — THE BRIDGE (Node.js Sidecar)                         │
+│  trigger-server.js: local HTTP server on port 3000.             │
+│  Accepts legacy and enriched payloads. Identity cache lookup.   │
+│  Smart deep-links: private chats (.v2) get direct URLs;         │
+│  shared channels (.tacv2) fall back to standard navigation.     │
+│  Tracks active session (no double-spawning). 10s cooldown.      │
+│  GET /status — session state for extension polling.              │
+│  GET/POST /identities — admin UI for Entra ID→name mapping.    │
+│  Spawns: bash run.sh session <model> <url> <sender> <text>      │
+└────────────────────────┬────────────────────────────────────────┘
                          │ child_process.spawn
-┌────────────────────────▼────────────────────────────────────┐
-│  LAYER 3 — THE EXECUTOR (Claude Code CLI)                   │
-│  claude -p "..." --chrome --model <model>                   │
-│  Reads BRAIN.md → navigates Teams → reads message →        │
-│  reads SOUL.md → composes reply → sends → polls for        │
-│  follow-ups until SESSION_DURATION expires → exits.         │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────▼────────────────────────────────────────┐
+│  LAYER 3 — THE EXECUTOR (Claude Code CLI)                       │
+│  claude -p "..." --chrome --model <model>                       │
+│  Reads BRAIN.md → navigates Teams (deep-link if available) →   │
+│  reads ALL unread messages → reads SOUL.md → composes reply →  │
+│  sends → polls for follow-ups until SESSION_DURATION expires.   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why API-Less?
@@ -212,24 +240,35 @@ SOUL.md defines Claude's voice when composing replies. Edit it to match the user
 | Mode | Claude invocations | Cost |
 |------|--------------------|------|
 | Legacy polling (120s) | 30/hour regardless of activity | High on quiet days |
-| Event-driven (current) | 1 per unread count increase | ~0 on quiet days |
+| Tab title event-driven | 1 per unread count increase | ~0 on quiet days |
+| WebSocket interception | 1 per message batch (with exact text) | ~0 on quiet days, fewer DOM reads |
 
-The extension enforces two debounce layers before Claude is invoked:
+The WebSocket path provides additional token savings because the exact message text and sender are passed directly to Claude, eliminating the need for DOM navigation to discover who sent what.
 
-1. **Client debounce (5s):** Prevents rapid-fire triggers from multiple title changes in quick succession.
-2. **Active session guard:** If a session is already running (`activeChild` is set), the bridge drops the trigger entirely — the session loop handles follow-ups internally.
-3. **Post-session cooldown (10s):** After a session exits, a short cooldown prevents an immediate re-trigger.
+The extension enforces multiple debounce layers before Claude is invoked:
+
+1. **Bridge.js dedup debounce (2s):** Suppresses duplicate `CustomEvent` dispatches for the same sender+text.
+2. **Batch accumulation window (3s):** Multiple messages arriving within 3 seconds are combined into a single trigger with all texts joined.
+3. **Client debounce (5s):** Prevents rapid-fire triggers from the title-monitoring path.
+4. **Active session guard:** If a session is already running, the WS path suppresses all incoming messages (the session loop handles follow-ups internally). The extension polls `GET /status` every 10s to detect when the session ends and re-enables triggers. The title path preserves `lastUnreadCount` on a dropped trigger so it can re-trigger once the session ends.
+5. **Post-session cooldown (10s):** After a session exits, a short cooldown prevents an immediate re-trigger.
 
 ### Known Limitations
 
-**Sender extraction is best-effort.**
-The extension attempts to read the sender name from the Teams DOM. Teams' internal CSS classes and data attributes change with UI updates. When extraction fails, the sender is reported as `null` and extension-level filtering is bypassed. BRAIN.md's Do Not Respond List remains the reliable gate.
+**Sender extraction is best-effort on the legacy path; reliable on the WebSocket path.**
+The WebSocket interceptor extracts the exact sender display name and Entra ID directly from SignalR frames — no DOM dependency. The legacy tab-title path still relies on content.js DOM scraping, which can fail when Teams updates its UI. When extraction fails on either path, the sender is reported as `null` and extension-level filtering is bypassed. BRAIN.md's Do Not Respond List remains the reliable gate.
+
+**WebSocket frame structure is speculative.**
+The SignalR JSON paths used by the interceptor (e.g. `parsed.arguments[0].resourceType === "NewMessage"`, `resource.from.displayName`) are based on observed Teams v2 behavior. Microsoft may change the frame schema without notice. When parsing fails, the interceptor silently passes frames through unmodified and the system falls back to tab-title detection.
+
+**Self-message detection depends on runtime learning.**
+The interceptor filters out the user's own messages by learning the self-ID from outgoing `WebSocket.send()` calls. Until the user sends their first message after page load, the self-ID is unknown and outgoing echoes may briefly trigger false positives. Page globals (`__NEXT_DATA__`) are also checked as a fallback.
 
 **Teams tab must remain open.**
 The extension monitors the tab title via `chrome.tabs.onUpdated`. If the Teams tab is closed, detection stops. The tab can be in the background — it does not need to be focused.
 
-**Follow-ups within a session are handled; older unreads are not.**
-On the initial pass, Claude responds only to the newest unread message. After sending, the session window stays open (default 2 minutes) and polls for follow-up messages in that same conversation. Unread messages in other conversations are not scanned until the next trigger.
+**Multi-message backlogs are handled within a conversation; other conversations are not.**
+On the initial pass, Claude scans the entire thread for all unread messages from the sender and addresses them in a single response. The session window (default 2 minutes) then stays open for follow-ups in that same conversation. Unread messages in other conversations are not scanned until the next trigger.
 
 **Single-platform.**
 The current implementation targets `teams.microsoft.com` and `teams.cloud.microsoft` only. The extension manifest and URL checks are Teams-specific.
@@ -246,14 +285,14 @@ Currently filtering is split across two places: the extension popup (ignore list
 
 Implementation path: the extension already passes `senderName` in the trigger payload. Extend the payload to also include the full `ignoreList` and `replyOnlyList` from `chrome.storage.local`. In `trigger-server.js`, write these lists to a local `runtime-config.json` on each trigger. Add a `Read` tool invocation at the start of BRAIN.md's Run Checklist to load `runtime-config.json`, and replace the static Do Not Respond / Respond List sections in BRAIN.md with a reference to that file. This makes the extension popup the authoritative UI and eliminates the need to edit BRAIN.md for routing changes.
 
-### Multi-Message Handling (Triple Text Problem)
-Currently Claude only responds to the newest unread message per invocation. If someone sends three messages in quick succession, only the last one gets a reply — the first two are silently skipped. The fix requires two changes: (1) BRAIN.md's Run Checklist step 4 should instruct Claude to scan and reply to **all** unread messages from the same sender in the current conversation, not just the newest; (2) the extension's unread count logic should not reset `lastUnreadCount` until Claude has processed all pending messages, preventing premature suppression of subsequent triggers.
+### ✅ Multi-Message Handling (Triple Text Problem) — Implemented
+Claude now scans the entire thread for all unread messages from the sender on the initial pass and addresses them together in a single chronological response. The extension's trigger condition was changed from `count > last` to `count !== last && count > 0`, so a count that decreases (e.g. 3→2 after a partial session) still fires a trigger. `lastUnreadCount` is only committed when the bridge responds `session_started` — dropped triggers (`active_session_exists`, cooldown) preserve the old value so the extension can re-trigger once the session ends.
 
 ### ✅ Conversation Session Mode (Keep-Alive) — Implemented
 After the initial reply, `run.sh` enters a keep-alive loop using `--continue` to reuse the same Claude session. It polls every 10 seconds for follow-up messages in the same conversation. The loop runs for `SESSION_DURATION` seconds (default: 120) starting from when the first reply was sent. BRAIN.md has separate **Initial Pass** and **Session Follow-up** checklists. The bridge uses `activeChild` tracking so incoming triggers during an active session are dropped — the session loop handles follow-ups internally. `SESSION_DURATION` is configurable via environment variable.
 
-### Reliable Sender Extraction
-Parse the contact or group name directly from the tab title (`(N) Chat | Name`). This is available without DOM access, making it CSP-safe and version-stable. Would make extension-level filtering reliable for 1:1 chats.
+### ✅ Reliable Sender Extraction — Implemented (WebSocket Interception)
+Rather than parsing the tab title or scraping the DOM, the extension now intercepts SignalR WebSocket frames in a MAIN world content script (`interceptor.js`). This extracts the exact sender display name, Entra ID, message text, and conversation ID directly from the raw JSON payloads — milliseconds before the UI updates. A bridge script (`bridge.js`) in ISOLATED world relays the data to the service worker, which batches messages (3s window), applies sender filters, and POSTs enriched payloads to the trigger-server. The server resolves unknown Entra IDs via a local identity cache (`identity-cache.json`, editable at `http://localhost:3000/identities`) and generates deep-links for private chats. Self-messages are filtered out by learning the user's ID from outgoing `WebSocket.send()` calls. The legacy tab-title path remains as a parallel fallback.
 
 ### Multi-Platform Support
 Extend `manifest.json` `matches` and `background.js` URL checks to cover Slack (`app.slack.com`) and Discord (`discord.com`). Each platform requires platform-specific title patterns and compose box instructions in BRAIN.md.
@@ -262,7 +301,7 @@ Extend `manifest.json` `matches` and `background.js` URL checks to cover Slack (
 Replace tab title polling with OS-level notification listeners (DBus on Linux, `terminal-notifier` on macOS). This approach is browser-agnostic and does not require the Teams tab to be open. See `EFFICIENCY_PROPOSALS.md` Option 2 for design details.
 
 ### Headless Mode
-Run Teams in a dedicated headless Chromium instance managed by Playwright, rather than the user's visible Chrome window. Eliminates the need for the user's browser to be open, enabling server-side deployment.
+Run Teams in a dedicated headless Chromium instance managed by Playwright, rather than the user's visible Chrome window. Eliminates the need for the user's browser to be open, enabling server-side deployment. Blocked by Chrome requiring `--user-data-dir` for `--remote-debugging-port`, which creates profile isolation issues (separate auth, no extensions).
 
 ### Windows Support
 `run.bat` exists for the polling mode. The bridge and extension are platform-agnostic. A `trigger-server.bat` wrapper and Windows installer script would complete Windows support.

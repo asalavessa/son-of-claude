@@ -10,16 +10,27 @@ A browser-automation agent that monitors Microsoft Teams and responds to message
 
 ## How It Works
 
-When a new Teams message arrives, a Chrome extension detects the unread badge in the tab title and notifies a local Node.js bridge. The bridge spawns Claude Code with `--chrome`, which navigates Teams, reads the message, and responds. After the first reply, the session stays open for a configurable window (default: 2 minutes) and polls for follow-ups before exiting. Claude only runs when there is actual activity, saving tokens compared to a polling loop.
+When a new Teams message arrives, a Chrome extension intercepts the raw WebSocket (SignalR) frame to extract the exact sender name, message text, and conversation ID — before the UI even updates. The data is relayed to a local Node.js bridge, which spawns Claude Code with the message context pre-loaded. Claude navigates directly to the conversation (via deep-link for private chats), reads all unread messages, and responds. After the first reply, the session stays open for a configurable window (default: 5 minutes) and polls for follow-ups before exiting. Claude only runs when there is actual activity, saving tokens compared to a polling loop.
+
+A legacy fallback path (tab title monitoring) runs in parallel and activates automatically if the WebSocket interception fails.
 
 ```
-Teams tab title changes to "(N) Chat | Name"
-  → Chrome extension detects unread count increase
-    → POSTs to local bridge (127.0.0.1:3000)
-      → Bridge spawns: bash run.sh session <model>
-        → Claude reads BRAIN.md, navigates Teams, replies
-          → Session loop polls for follow-ups every 10s
-            → Loop exits after SESSION_DURATION seconds (default: 120)
+PRIMARY PATH — WebSocket Interception:
+  Teams receives a SignalR WebSocket frame
+    → interceptor.js (MAIN world) parses JSON, extracts sender + text
+      → bridge.js (ISOLATED world) relays via chrome.runtime.sendMessage
+        → background.js batches messages (3s window), applies filters
+          → POSTs enriched payload to local bridge (127.0.0.1:3000)
+            → Bridge resolves identity, generates deep-link
+              → Spawns: bash run.sh session <model> <url> <sender> <text>
+                → Claude navigates directly, responds to ALL messages
+                  → Session loop polls for follow-ups
+                    → Loop exits after SESSION_DURATION seconds
+
+FALLBACK PATH — Tab Title Monitoring:
+  Teams tab title changes to "(N) Chat | Name"
+    → background.js detects unread count increase
+      → POSTs to bridge → spawns Claude (without pre-loaded text)
 ```
 
 Personality and tone come from `SOUL.md`. Operational rules — who to respond to, what to avoid, how to navigate Teams — live in `BRAIN.md`.
@@ -122,31 +133,41 @@ Click **Save** after changing the model or filter lists. The toggle takes effect
 
 ### Step 4 — Verify end-to-end
 
-In a separate terminal:
+In a separate terminal, test the enriched WebSocket payload path:
+
+```bash
+bash scripts/test-websocket.sh
+```
+
+Or test the legacy path:
 
 ```bash
 bash scripts/test-trigger.sh
 ```
 
-Expected output:
+Expected output for either:
 ```
-HTTP Status: 200
-{"status":"triggered","timestamp":"..."}
-✅ Trigger accepted
+{"status":"session_started","timestamp":"..."}
 ```
 
 In the bridge terminal you should see Claude spawning and running.
 
 ### Step 5 — Test with a real message
 
-Have someone (or yourself from another device) send a message in Teams. Within a few seconds you should see:
+Have someone (or yourself from another device) send a message in Teams. Within a few seconds you should see in the bridge terminal:
 
 ```
-[timestamp] Activity detected. Sender: unknown, Model: claude-sonnet-4-6
-[timestamp] Triggering Claude...
+[timestamp] Activity detected. Sender: John Doe, Model: claude-sonnet-4-6
+[timestamp] Message text (1 msgs): Hello, how are you?
+[timestamp] Starting session...
 ```
 
-Followed by Claude's output as it navigates Teams and replies.
+Check the service worker console (`chrome://extensions` → Son of Claude Watcher → "Inspect views: service worker") for:
+```
+Son of Claude [ws]: Received intercepted message from John Doe
+Son of Claude [ws]: Flushing batch of 1 message(s) to bridge server...
+Son of Claude [ws]: Session started
+```
 
 ---
 
@@ -162,7 +183,15 @@ Followed by Claude's output as it navigates Teams and replies.
 | **Only reply to** | One name per line. Empty = no restriction. Applied before Claude runs. |
 | **Save** | Persists model and filter lists. Toggle saves automatically. |
 
-> **Note:** Extension-level sender filtering is best-effort. The sender name is extracted from the Teams DOM and may not always be available. `BRAIN.md`'s Do Not Respond List is the reliable safety gate.
+> **Note:** The WebSocket interception path extracts the exact sender name from SignalR frames — reliable and DOM-independent. The legacy tab-title path still relies on DOM scraping and may return `null`. In both cases, `BRAIN.md`'s Do Not Respond List is the authoritative safety gate.
+
+---
+
+## Identity Cache
+
+When the WebSocket interceptor captures a sender's Entra ID but the display name is unavailable, the bridge server checks a local identity cache (`identity-cache.json`). If the ID is not mapped, the extension shows an OS notification with the unknown ID.
+
+**Admin UI:** Visit `http://localhost:3000/identities` while the bridge is running to view, add, edit, or delete Entra ID → display name mappings.
 
 ---
 
@@ -172,7 +201,7 @@ Followed by Claude's output as it navigates Teams and replies.
 |------------------|-----------|
 | `extension/*.js` or `extension/manifest.json` | `chrome://extensions` → Son of Claude Watcher → ↺ Reload, then refresh the Teams tab |
 | `BRAIN.md` or `SOUL.md` | No restart needed — Claude reads them fresh each invocation |
-| `trigger-server.js` | Stop bridge (`Ctrl+C`), restart with `node trigger-server.js` |
+| `trigger-server.js` or `identity-cache.json` | Stop bridge (`Ctrl+C`), restart with `node trigger-server.js` |
 | `run.sh` | No restart needed — bridge re-reads it on each spawn |
 | Extension popup settings | Saved automatically — no restart needed |
 
@@ -236,7 +265,19 @@ Check Claude's output in the bridge terminal. Common causes:
 This is expected behavior during an active session. The session loop polls for follow-ups for `SESSION_DURATION` seconds (default: 120) after the last reply. The bridge enforces a 10-minute hard kill. If the session never exits and no replies are being sent, check that `BRAIN.md`'s Session Follow-up Checklist outputs `NO_NEW_MSG` when there is nothing to reply to.
 
 **Session seems stuck polling with no activity**
-If `run.sh` logs "No follow-up detected" repeatedly for an unusually long time, `SESSION_DURATION` may be set too high. The default is 120 seconds. Override with `export SESSION_DURATION=60` before starting the bridge.
+If `run.sh` logs "No follow-up detected" repeatedly for an unusually long time, `SESSION_DURATION` may be set too high. The default is 300 seconds. Override with `export SESSION_DURATION=60` before starting the bridge.
+
+**No "WebSocket proxy installed" log in Teams console**
+The interceptor may not have loaded before Teams. Check `chrome://extensions` → Son of Claude Watcher is enabled, then hard-refresh the Teams tab (`Ctrl+Shift+R`). The interceptor must run at `document_start` before Teams establishes its WebSocket connections.
+
+**Interceptor logs messages but bridge terminal shows nothing**
+Check the service worker console for errors. The bridge.js → background.js → trigger-server chain requires all three to be functional. Common cause: the bridge server is not running (`node trigger-server.js`).
+
+**Claude replies to own messages / triggers on self-sent messages**
+The interceptor learns the self-ID from outgoing `WebSocket.send()` calls. If no outgoing message has been sent since page load, the self-ID is unknown. Send any message manually in Teams to prime the self-detection, then the issue resolves.
+
+**Unknown Entra ID notification keeps appearing**
+Map the ID at `http://localhost:3000/identities`. The notification fires each time a trigger arrives with an unmapped sender ID.
 
 ---
 

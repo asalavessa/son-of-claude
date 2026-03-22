@@ -5,12 +5,24 @@
 # until SESSION_DURATION expires or no new message is detected.
 if [ "$1" == "session" ]; then
   MODEL="${2:-claude-sonnet-4-6}"
-  SESSION_DURATION="${SESSION_DURATION:-120}"  # Override with: export SESSION_DURATION=300
+  TEAMS_URL="${3:-}"
+  SENDER="${4:-}"
+  MESSAGE_TEXT="${5:-}"
+  SESSION_DURATION="${SESSION_DURATION:-300}"  # Override with: export SESSION_DURATION=120
 
   echo "[$(date)] Starting Conversation Session. Model: ${MODEL}, Window: ${SESSION_DURATION}s"
+  [ -n "$SENDER" ] && echo "[$(date)] Sender: ${SENDER}"
+  [ -n "$TEAMS_URL" ] && echo "[$(date)] Teams URL: ${TEAMS_URL}"
+  [ -n "$MESSAGE_TEXT" ] && echo "[$(date)] Message text: ${MESSAGE_TEXT:0:100}"
+
+  # Build context hints for the initial prompt
+  CONTEXT_HINTS=""
+  [ -n "$TEAMS_URL" ] && CONTEXT_HINTS="${CONTEXT_HINTS} Navigate directly to '${TEAMS_URL}'."
+  [ -n "$SENDER" ] && CONTEXT_HINTS="${CONTEXT_HINTS} The message is from '${SENDER}'."
+  [ -n "$MESSAGE_TEXT" ] && CONTEXT_HINTS="${CONTEXT_HINTS} One of the messages says: '${MESSAGE_TEXT}'. There may be additional unread messages in the conversation — read and respond to ALL of them."
 
   # Initial pass: handle the triggering message
-  claude -p "You are an automated agent starting a conversation session. Read BRAIN.md now. Execute the Initial Pass checklist. Start by reading BRAIN.md." \
+  claude -p "You are an automated agent starting a conversation session.${CONTEXT_HINTS} Read BRAIN.md now. Execute the Initial Pass checklist. Start by reading BRAIN.md." \
     --chrome --model "${MODEL}" --allowedTools "mcp__claude-in-chrome*"
 
   # Timer starts AFTER the first reply is sent
@@ -26,8 +38,8 @@ if [ "$1" == "session" ]; then
       --chrome --model "${MODEL}" --allowedTools "mcp__claude-in-chrome*" 2>&1)
 
     if echo "$RESULT" | grep -q "NO_NEW_MSG"; then
-      echo "[$(date)] No follow-up detected. Waiting 10s before next check..."
-      sleep 10
+      echo "[$(date)] No follow-up detected. Waiting 5s before next check..."
+      sleep 5
     else
       echo "[$(date)] Follow-up handled. Extending session window."
       END_TIME=$(( $(date +%s) + SESSION_DURATION ))
@@ -41,8 +53,17 @@ fi
 # ONCE MODE: single pass, used for direct invocation or testing.
 if [ "$1" == "once" ]; then
   MODEL="${2:-claude-sonnet-4-6}"
+  TEAMS_URL="${3:-}"
+  SENDER="${4:-}"
+  MESSAGE_TEXT="${5:-}"
   echo "[$(date)] Event-driven run triggered. Model: ${MODEL}"
-  claude -p "You are an automated agent executing a single-pass task. Read BRAIN.md now. Execute every step in the Run Checklist section using your tools. After step 6, stop immediately — do not re-check, do not verify, do not loop. Start by reading BRAIN.md." \
+
+  CONTEXT_HINTS=""
+  [ -n "$TEAMS_URL" ] && CONTEXT_HINTS="${CONTEXT_HINTS} Navigate directly to '${TEAMS_URL}'."
+  [ -n "$SENDER" ] && CONTEXT_HINTS="${CONTEXT_HINTS} The message is from '${SENDER}'."
+  [ -n "$MESSAGE_TEXT" ] && CONTEXT_HINTS="${CONTEXT_HINTS} One of the messages says: '${MESSAGE_TEXT}'. There may be additional unread messages in the conversation — read and respond to ALL of them."
+
+  claude -p "You are an automated agent executing a single-pass task.${CONTEXT_HINTS} Read BRAIN.md now. Execute every step in the Run Checklist section using your tools. After step 6, stop immediately — do not re-check, do not verify, do not loop. Start by reading BRAIN.md." \
     --chrome --model "${MODEL}" --allowedTools "mcp__claude-in-chrome*"
   echo "[$(date)] Event-driven run complete."
   exit 0
